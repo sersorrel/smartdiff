@@ -1,0 +1,62 @@
+#!/bin/sh
+
+# Copyright © 2018 Ash Holland. Licensed under the EUPL (1.2 or later).
+
+drive="$1"
+status=0
+path=/var/local/smartdiff
+logpath="$path/logs/$drive"
+
+create_new_state() {
+	mkdir -p "$logpath"
+	# Extra attributes from here:
+	# <https://www.micron.com/~/media/documents/products/technical-note/solid-state-storage/tnfd22_client_ssd_smart_attributes.pdf>
+	smartctl -A "$drive" | head -n -1 | tail -n +7 | sed \
+		-e 's/171 Unknown_Attribute/171 Program_Fail_Cnt /' \
+		-e 's/172 Unknown_Attribute/172 Erase_Fail_Cnt   /' \
+		-e 's/173 Unknown_Attribute/173 Avg_Blk_Erase_Cnt/' \
+		-e 's/174 Unknown_Attribute /174 Unexp_Pwr_Loss_Cnt/' \
+		-e 's/202 Unknown_SSD_Attribute /202 Pct_Lifetime_Remaining/' \
+		-e 's/206 Unknown_SSD_Attribute/206 Write_Error_Rate     /' \
+		-e 's/210 Unknown_Attribute/210 RAIN_Recover_Cnt /' \
+		-e 's/246 Unknown_Attribute   /246 Host_Sectors_Written/' \
+		-e 's/247 Unknown_Attribute      /247 Host_NAND_Pages_Written/' \
+		-e 's/248 Unknown_Attribute     /248 FTL_NAND_Pages_Written/' \
+		> "$logpath/$(date --iso-8601=seconds)"
+}
+
+if ! [ "$(id -u)" -eq 0 ]; then
+	printf "Not running as root, you may get spurious failures.\\n"
+fi
+
+if ! [ -e "$drive" ]; then
+	printf "Drive '%s' does not exist.\\n" "$drive"
+	exit 1
+fi
+
+# Basic health check
+if smartctl -H "$drive" | grep "test result" | tee /dev/tty | grep -qi "FAIL"; then
+	status=17
+	cat << "EOF"
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+@                                   WARNING!                                   @
+@                                                                              @
+@ The drive reported a FAILED health self-assessment -- failure is imminent!   @
+@                                                                              @
+@ You should immediately begin backing up critical data.                       @
+@ The drive may fail at any time!                                              @
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+EOF
+fi
+
+if [ -d "$logpath" ]; then
+	past_state_file="$logpath/$(ls -1 "$logpath" | tail -n1)"
+else
+	past_state_file=/dev/null
+fi
+create_new_state
+new_state_file="$logpath/$(ls -1 "$logpath" | tail -n1)"
+
+git --no-pager diff --word-diff-regex="[^[:space:]]+" --no-prefix -U9999 -- "$past_state_file" "$new_state_file" | grep -EA9999 '^@@' | sed 1d | column -t
+
+exit $status
